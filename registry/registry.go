@@ -10,6 +10,7 @@
 package registry
 
 import (
+	"errors"
 	"sort"
 	"time"
 
@@ -23,6 +24,10 @@ import (
 
 const (
 	requestTimeout = 10 * time.Second
+)
+
+var (
+	ErrNoImageData = errors.New("image data not available")
 )
 
 // The Registry interface is a domain specific API to access container registries.
