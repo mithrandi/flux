@@ -1,6 +1,7 @@
 package release
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -72,15 +73,9 @@ var (
 		},
 	}
 	testSvcSpec, _ = update.ParseResourceSpec(testSvc.ID.String())
-
-	allSvcs = []cluster.Controller{
-		hwSvc,
-		lockedSvc,
-		testSvc,
-	}
-	newRef, _    = image.ParseRef("quay.io/weaveworks/helloworld:master-a000002")
-	timeNow      = time.Now()
-	mockRegistry = registry.NewMockRegistry([]image.Info{
+	newRef, _      = image.ParseRef("quay.io/weaveworks/helloworld:master-a000002")
+	timeNow        = time.Now()
+	mockRegistry   = registry.NewMockRegistry([]image.Info{
 		image.Info{
 			ID:        newRef,
 			CreatedAt: timeNow,
@@ -93,23 +88,31 @@ var (
 	mockManifests = &kubernetes.Manifests{}
 )
 
+func mockCluster(running ...cluster.Controller) *cluster.Mock {
+	return &cluster.Mock{
+		AllServicesFunc: func(string) ([]cluster.Controller, error) {
+			return running, nil
+		},
+		SomeServicesFunc: func(ids []flux.ResourceID) ([]cluster.Controller, error) {
+			var res []cluster.Controller
+			for _, id := range ids {
+				for _, svc := range running {
+					if id == svc.ID {
+						res = append(res, svc)
+					}
+				}
+			}
+			return res, nil
+		},
+	}
+}
+
 func setup(t *testing.T) (*git.Checkout, func()) {
 	return gittest.Checkout(t)
 }
 
 func Test_FilterLogic(t *testing.T) {
-	mockCluster := &cluster.Mock{
-		AllServicesFunc: func(string) ([]cluster.Controller, error) {
-			return allSvcs, nil
-		},
-		SomeServicesFunc: func([]flux.ResourceID) ([]cluster.Controller, error) {
-			return []cluster.Controller{
-				hwSvc,
-				lockedSvc,
-			}, nil
-		},
-	}
-
+	cluster := mockCluster(hwSvc, lockedSvc) // no testsvc in cluster, but it _is_ in repo
 	notInRepoService := "default:deployment/notInRepo"
 	notInRepoSpec, _ := update.ParseResourceSpec(notInRepoService)
 	for _, tst := range []struct {
@@ -119,7 +122,7 @@ func Test_FilterLogic(t *testing.T) {
 	}{
 		// ignored if: excluded OR not included OR not correct image.
 		{
-			Name: "not included",
+			Name: "include specific service",
 			Spec: update.ReleaseSpec{
 				ServiceSpecs: []update.ResourceSpec{hwSvcSpec},
 				ImageSpec:    update.ImageSpecLatest,
@@ -147,7 +150,7 @@ func Test_FilterLogic(t *testing.T) {
 				},
 			},
 		}, {
-			Name: "excluded",
+			Name: "exclude specific service",
 			Spec: update.ReleaseSpec{
 				ServiceSpecs: []update.ResourceSpec{update.ResourceSpecAll},
 				ImageSpec:    update.ImageSpecLatest,
@@ -175,7 +178,7 @@ func Test_FilterLogic(t *testing.T) {
 				},
 			},
 		}, {
-			Name: "not image",
+			Name: "update specific image",
 			Spec: update.ReleaseSpec{
 				ServiceSpecs: []update.ResourceSpec{update.ResourceSpecAll},
 				ImageSpec:    update.ImageSpecFromRef(newRef),
@@ -198,7 +201,7 @@ func Test_FilterLogic(t *testing.T) {
 					Error:  update.DifferentImage,
 				},
 				flux.MustParseResourceID("default:deployment/test-service"): update.ControllerResult{
-					Status: update.ReleaseStatusIgnored,
+					Status: update.ReleaseStatusSkipped,
 					Error:  update.NotInCluster,
 				},
 			},
@@ -294,7 +297,7 @@ func Test_FilterLogic(t *testing.T) {
 		checkout, cleanup := setup(t)
 		defer cleanup()
 		testRelease(t, tst.Name, &ReleaseContext{
-			cluster:   mockCluster,
+			cluster:   cluster,
 			manifests: mockManifests,
 			registry:  mockRegistry,
 			repo:      checkout,
@@ -303,19 +306,7 @@ func Test_FilterLogic(t *testing.T) {
 }
 
 func Test_ImageStatus(t *testing.T) {
-	mockCluster := &cluster.Mock{
-		AllServicesFunc: func(string) ([]cluster.Controller, error) {
-			return allSvcs, nil
-		},
-		SomeServicesFunc: func([]flux.ResourceID) ([]cluster.Controller, error) {
-			return []cluster.Controller{
-				hwSvc,
-				lockedSvc,
-				testSvc,
-			}, nil
-		},
-	}
-
+	cluster := mockCluster(hwSvc, lockedSvc, testSvc)
 	upToDateRegistry := registry.NewMockRegistry([]image.Info{
 		image.Info{
 			ID:        oldRef,
@@ -382,7 +373,7 @@ func Test_ImageStatus(t *testing.T) {
 		checkout, cleanup := setup(t)
 		defer cleanup()
 		ctx := &ReleaseContext{
-			cluster:   mockCluster,
+			cluster:   cluster,
 			manifests: mockManifests,
 			repo:      checkout,
 			registry:  upToDateRegistry,
@@ -397,6 +388,8 @@ func testRelease(t *testing.T, name string, ctx *ReleaseContext, spec update.Rel
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(expected, results) {
-		t.Errorf("%s - expected:\n%#v, got:\n%#v", name, expected, results)
+		exp, _ := json.Marshal(expected)
+		got, _ := json.Marshal(results)
+		t.Errorf("%s\n--- expected ---\n%s\n--- got ---\n%s\n", name, string(exp), string(got))
 	}
 }
