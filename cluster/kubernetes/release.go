@@ -61,26 +61,47 @@ func (c *Kubectl) connectArgs() []string {
 func (c *Kubectl) execute(logger log.Logger, errs cluster.SyncError) {
 	defer c.changeSet.clear()
 
+	type executeSet struct {
+		rw  io.ReadWriter
+		cmd []string
+		changeSet
+	}
+
 	for _, cmd := range cmds {
-		buf := &bytes.Buffer{}
+		defaultSet := executeSet{rw: &bytes.Buffer{}, cmd: []string{cmd, "--namespace", "default"}}
+		otherSet := executeSet{rw: &bytes.Buffer{}, cmd: []string{cmd}}
+
 		for _, obj := range c.objs[cmd] {
-			fmt.Fprintln(buf, "---")
-			fmt.Fprintln(buf, string(obj.bytes))
+			set := defaultSet
+			if !obj.hasDefaultNamespace() {
+				set = otherSet
+			}
+			set.stage(cmd, obj.id, obj.apiObject)
+			fmt.Fprintln(set.rw, "---")
+			fmt.Fprintln(set.rw, string(obj.bytes))
 		}
 
-		if err := c.doCommand(logger, cmd, buf); err != nil {
-			for _, obj := range c.objs[cmd] {
+		if err := c.doCommand(logger, defaultSet.rw, defaultSet.cmd...); err != nil {
+			for _, obj := range defaultSet.objs[cmd] {
 				r := bytes.NewReader(obj.bytes)
-				if err := c.doCommand(logger, cmd, r); err != nil {
-					errs[obj.Metadata.Name] = err
+				if err := c.doCommand(logger, r, defaultSet.cmd...); err != nil {
+					errs[obj.id] = err
+				}
+			}
+		}
+		if err := c.doCommand(logger, otherSet.rw, otherSet.cmd...); err != nil {
+			for _, obj := range otherSet.objs[cmd] {
+				r := bytes.NewReader(obj.bytes)
+				if err := c.doCommand(logger, r, otherSet.cmd...); err != nil {
+					errs[obj.id] = err
 				}
 			}
 		}
 	}
 }
 
-func (c *Kubectl) doCommand(logger log.Logger, command string, r io.Reader) error {
-	args := []string{command, "-f", "-"}
+func (c *Kubectl) doCommand(logger log.Logger, r io.Reader, args ...string) error {
+	args = append(args, "-f", "-")
 	cmd := c.kubectlCommand(args...)
 	cmd.Stdin = r
 	stderr := &bytes.Buffer{}

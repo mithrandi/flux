@@ -3,7 +3,6 @@ package kubernetes
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"sync"
 
 	k8syaml "github.com/ghodss/yaml"
@@ -46,8 +45,14 @@ type apiObject struct {
 	bytes    []byte
 	Kind     string `yaml:"kind"`
 	Metadata struct {
-		Name string `yaml:"name"`
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
 	} `yaml:"metadata"`
+}
+
+func (o *apiObject) hasDefaultNamespace() bool {
+	ns := o.Metadata.Namespace
+	return ns == "default" || ns == ""
 }
 
 // --- add-ons
@@ -82,8 +87,7 @@ func isAddon(obj namespacedLabeled) bool {
 // --- /add ons
 
 type Applier interface {
-	doCommand(log.Logger, string, io.Reader) error
-	stage(string, string, *apiObject)
+	stage(id, cmd string, obj *apiObject)
 	execute(log.Logger, cluster.SyncError)
 }
 
