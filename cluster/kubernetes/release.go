@@ -61,43 +61,54 @@ func (c *Kubectl) connectArgs() []string {
 func (c *Kubectl) execute(logger log.Logger, errs cluster.SyncError) {
 	defer c.changeSet.clear()
 
-	type executeSet struct {
-		rw  io.ReadWriter
-		cmd []string
-		changeSet
-	}
-
 	for _, cmd := range cmds {
-		defaultSet := executeSet{rw: &bytes.Buffer{}, cmd: []string{cmd, "--namespace", "default"}}
-		otherSet := executeSet{rw: &bytes.Buffer{}, cmd: []string{cmd}}
+		defaultSet := newExecuteSet(cmd, "--namespace", "default")
+		otherSet := newExecuteSet(cmd)
 
 		for _, obj := range c.objs[cmd] {
 			set := defaultSet
 			if !obj.hasDefaultNamespace() {
 				set = otherSet
 			}
-			set.stage(cmd, obj.id, obj.apiObject)
-			fmt.Fprintln(set.rw, "---")
-			fmt.Fprintln(set.rw, string(obj.bytes))
+			set.stage(obj)
 		}
 
-		if err := c.doCommand(logger, defaultSet.rw, defaultSet.cmd...); err != nil {
-			for _, obj := range defaultSet.objs[cmd] {
-				r := bytes.NewReader(obj.bytes)
-				if err := c.doCommand(logger, r, defaultSet.cmd...); err != nil {
-					errs[obj.id] = err
-				}
-			}
-		}
-		if err := c.doCommand(logger, otherSet.rw, otherSet.cmd...); err != nil {
-			for _, obj := range otherSet.objs[cmd] {
-				r := bytes.NewReader(obj.bytes)
-				if err := c.doCommand(logger, r, otherSet.cmd...); err != nil {
-					errs[obj.id] = err
-				}
+		c.exec(logger, defaultSet, cmd, errs)
+		c.exec(logger, otherSet, cmd, errs)
+	}
+}
+
+func (c *Kubectl) exec(logger log.Logger, s *executeSet, cmd string, errs cluster.SyncError) {
+	if len(s.objs) == 0 {
+		return
+	}
+	// Attempt to apply everything in s at once, else fallback to applying one at a time.
+	if err := c.doCommand(logger, s.rw, s.cmd...); err != nil {
+		for _, obj := range s.objs {
+			r := bytes.NewReader(obj.bytes)
+			if err := c.doCommand(logger, r, s.cmd...); err != nil {
+				errs[obj.id] = err
 			}
 		}
 	}
+}
+
+type executeSet struct {
+	cmd  []string
+	rw   io.ReadWriter
+	objs []obj
+}
+
+func newExecuteSet(cmd ...string) *executeSet {
+	return &executeSet{
+		cmd: cmd,
+		rw:  &bytes.Buffer{},
+	}
+}
+
+func (s *executeSet) stage(o obj) {
+	s.objs = append(s.objs, o)
+	fmt.Fprintln(s.rw, "---\n"+string(o.bytes))
 }
 
 func (c *Kubectl) doCommand(logger log.Logger, r io.Reader, args ...string) error {
